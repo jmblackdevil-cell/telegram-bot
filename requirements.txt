@@ -1,0 +1,8 @@
+pyTelegramBotAPI
+requests
+pandas
+numpy
+yfinance
+pytz
+matplotlib
+beautifulsoup4
