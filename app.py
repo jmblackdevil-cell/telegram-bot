@@ -23,66 +23,9 @@ def safe_send(chat_id, text):
     except:
         bot.send_message(chat_id, text)
 
-# ================= MARKET CONFIG =================
-MARKETS = {
-    "Nikkei": ("^N225", "🇯🇵", (5,30),(11,30)),
-    "Hang Seng": ("^HSI", "🇭🇰", (7,15),(14,0)),
-    "KOSPI": ("^KS11", "🇰🇷", (5,30),(12,30)),
-    "DAX": ("^GDAXI", "🇩🇪", (13,0),(21,30)),
-    "FTSE": ("^FTSE", "🇬🇧", (13,30),(22,0)),
-    "CAC": ("^FCHI", "🇫🇷", (13,30),(22,0)),
-    "Nasdaq": ("^IXIC", "🇺🇸", (19,0),(1,30)),
-    "S&P500": ("^GSPC", "🇺🇸", (19,0),(1,30)),
-    "Dow": ("^DJI", "🇺🇸", (19,0),(1,30)),
-}
-
 # ================= HELPERS =================
 def now_ist():
     return datetime.now(IST)
-
-def is_open(o, c):
-    now = now_ist()
-    mins = now.hour*60 + now.minute
-    o_m = o[0]*60 + o[1]
-    c_m = c[0]*60 + c[1]
-    if c_m < o_m:
-        return mins >= o_m or mins <= c_m
-    return o_m <= mins <= c_m
-
-def fetch_price(ticker):
-    try:
-        d = yf.Ticker(ticker).fast_info
-        price = round(d.last_price,2)
-        prev = round(d.previous_close,2)
-        chg = round(((price-prev)/prev)*100,2)
-        arrow = "🟢" if chg>=0 else "🔴"
-        return price, f"{arrow} {chg:+.2f}%", chg
-    except:
-        return "N/A","",0
-
-# ================= GLOBAL =================
-def get_global():
-    out = []
-    score = 0
-
-    groups = {
-        "🌏 ASIA":["Nikkei","Hang Seng","KOSPI"],
-        "🌍 EUROPE":["DAX","FTSE","CAC"],
-        "🇺🇸 US":["Nasdaq","S&P500","Dow"]
-    }
-
-    for g, names in groups.items():
-        out.append(g)
-        for n in names:
-            t,_,o,c = MARKETS[n]
-            p,chg_str,chg = fetch_price(t)
-            status = "🟡" if is_open(o,c) else "⚫"
-            out.append(f"{n}: {p} {chg_str} {status}")
-            score += 1 if chg>0 else -1
-
-    sentiment = "🟢 Bullish" if score>3 else ("🔴 Bearish" if score<-3 else "⚪ Neutral")
-
-    return "\n".join(out), sentiment
 
 # ================= TREND ENGINE =================
 def get_trend_score():
@@ -92,9 +35,7 @@ def get_trend_score():
         if df is None or df.empty or len(df) < 20:
             return 0, 0, "Data unavailable"
 
-        # Normalize columns
         df.columns = [c.lower() for c in df.columns]
-
         close = df["close"]
 
         price = round(float(close.iloc[-1]), 0)
@@ -111,7 +52,6 @@ def get_trend_score():
 
         # SCORE
         score = 0
-
         score += 1 if price > ma20 else -1
         score += 1 if ma20 > ma50 else -1
 
@@ -120,19 +60,54 @@ def get_trend_score():
         elif rsi < 40:
             score -= 1
 
-        return score, price, f"MA20:{ma20} MA50:{ma50} RSI:{rsi}"
+        info = f"MA20: {ma20}\nMA50: {ma50}\nRSI: {rsi}"
+
+        return score, price, info
 
     except Exception as e:
         print("TREND ERROR:", e)
         return 0, 0, "Error"
+
+# ================= COMMAND =================
+@bot.message_handler(commands=["trend"])
+def trend_cmd(msg):
+    score, price, info = get_trend_score()
+
+    if price == 0:
+        safe_send(msg.chat.id, "⚠️ Trend data not available. Try again.")
+        return
+
+    if score >= 3:
+        label = "📈 STRONG BULLISH"
+        action = "Buy CE on dips"
+        conf = "HIGH"
+    elif score == 2:
+        label = "📈 MODERATE BULLISH"
+        action = "Buy CE carefully"
+        conf = "MEDIUM"
+    elif score == 1:
+        label = "⚪ WEAK"
+        action = "Avoid trades"
+        conf = "LOW"
+    elif score == 0:
+        label = "⚪ NO TRADE"
+        action = "Stay out"
+        conf = "LOW"
+    elif score <= -3:
+        label = "📉 STRONG BEARISH"
+        action = "Buy PE on rise"
+        conf = "HIGH"
+    else:
+        label = "📉 BEARISH"
+        action = "Sell rallies"
+        conf = "MEDIUM"
+
+    text = f"""
 📊 NIFTY TREND ANALYSIS
 
 Price: {price}
-MA20: {ma20}
-MA50: {ma50}
 
-RSI: {rsi}
-ATR: {atr}
+{info}
 
 ━━━━━━━━━━━━
 TREND SCORE: {score}
@@ -145,40 +120,12 @@ ACTION:
 Confidence: {conf}
 """
 
-    except:
-        return "Trend data failed"
+    safe_send(msg.chat.id, text)
 
-# ================= COMMANDS =================
+# ================= START =================
+print("Bot running...")
 
-@bot.message_handler(commands=["trend"])
-def trend_cmd(msg):
-    score, price, info = get_trend_score()
+threading.Thread(target=bot.polling, kwargs={"none_stop": True}).start()
 
-    if price == 0:
-        send("⚠️ Trend data not available. Try again.")
-        return
-
-    if score >= 3:
-        label = "📈 STRONG BULLISH"
-    elif score == 2:
-        label = "📈 MODERATE BULLISH"
-    elif score == 1:
-        label = "⚪ WEAK"
-    elif score == 0:
-        label = "⚪ NO TRADE"
-    elif score <= -3:
-        label = "📉 STRONG BEARISH"
-    else:
-        label = "📉 BEARISH"
-
-    send(f"""
-📊 NIFTY TREND
-
-Price: {price}
-
-{info}
-
-━━━━━━━━━━━━
-Score: {score}
-{label}
-""")
+while True:
+    time.sleep(10)
