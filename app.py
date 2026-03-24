@@ -1,138 +1,167 @@
 import os
 import telebot
 import yfinance as yf
+import pandas as pd
+import numpy as np
 from datetime import datetime
 import pytz
+import time
+import threading
 
-# ================= CONFIG =================
+# CONFIG
 TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
 bot = telebot.TeleBot(TOKEN)
+bot.delete_webhook()
 
 IST = pytz.timezone("Asia/Kolkata")
 
-# ================= SEND =================
-def send(chat_id, text):
+def now():
+    return datetime.now(IST)
+
+def send(msg):
     try:
-        bot.send_message(chat_id, text)
+        bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
     except:
-        pass
+        bot.send_message(CHAT_ID, msg)
 
-# ================= MARKETS =================
-MARKETS = {
-    "Nikkei": "^N225",
-    "Hang Seng": "^HSI",
-    "KOSPI": "^KS11",
-    "DAX": "^GDAXI",
-    "FTSE": "^FTSE",
-    "CAC": "^FCHI",
-    "Nasdaq": "^IXIC",
-    "S&P500": "^GSPC",
-    "Dow": "^DJI",
-    "Crude": "CL=F",
-    "Gold": "GC=F",
-    "Gift Nifty": "^NSEI"
-}
+# ================= TREND =================
+def get_trend_score():
+    df = yf.download("^NSEI", period="60d", interval="1d", progress=False)
+    close = df["Close"]
 
-# ================= FETCH =================
-def fetch(ticker):
-    try:
-        df = yf.download(ticker, period="3d", interval="1d", progress=False, threads=False)
+    ma20 = close.rolling(20).mean().iloc[-1]
+    ma50 = close.rolling(50).mean().iloc[-1]
+    price = close.iloc[-1]
 
-        if df is None or df.empty or len(df) < 2:
-            return "N/A", "", 0
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = (-delta.clip(upper=0)).rolling(14).mean()
+    rs = gain / loss
+    rsi = (100 - (100 / (1 + rs))).iloc[-1]
 
-        df = df.dropna()
-
-        price = round(df["Close"].iloc[-1], 2)
-        prev = round(df["Close"].iloc[-2], 2)
-
-        chg = round(((price - prev) / prev) * 100, 2)
-        arrow = "🟢" if chg >= 0 else "🔴"
-
-        return price, f"{arrow} {chg:+.2f}%", chg
-
-    except Exception as e:
-        print("FETCH ERROR:", e)
-        return "N/A", "", 0
-
-# ================= GLOBAL =================
-def global_market():
     score = 0
+    score += 1 if price > ma20 else -1
+    score += 1 if ma20 > ma50 else -1
+    if rsi > 60: score += 1
+    elif rsi < 40: score -= 1
 
-    asia = ["Nikkei","Hang Seng","KOSPI"]
-    europe = ["DAX","FTSE","CAC"]
-    us = ["Nasdaq","S&P500","Dow"]
+    return int(score), round(price,0)
 
-    text = "━━━━━━━━━━━━\n"
+# ================= FVG DETECTION =================
+def detect_fvg(df):
+    fvg = []
 
-    # ASIA
-    text += "🌏 ASIA\n"
-    for m in asia:
-        p, chg_str, chg = fetch(MARKETS[m])
-        text += f"{m}: {p} {chg_str}\n"
-        score += 1 if chg > 0 else -1
+    for i in range(2, len(df)):
+        c1 = df.iloc[i-2]
+        c2 = df.iloc[i-1]
+        c3 = df.iloc[i]
 
-    # EUROPE
-    text += "\n🌍 EUROPE\n"
-    for m in europe:
-        p, chg_str, chg = fetch(MARKETS[m])
-        text += f"{m}: {p} {chg_str}\n"
-        score += 1 if chg > 0 else -1
+        # Bullish FVG
+        if c1["high"] < c3["low"]:
+            fvg.append(("bullish", c1["high"], c3["low"]))
 
-    # US
-    text += "\n🇺🇸 US\n"
-    for m in us:
-        p, chg_str, chg = fetch(MARKETS[m])
-        text += f"{m}: {p} {chg_str}\n"
-        score += 1 if chg > 0 else -1
+        # Bearish FVG
+        if c1["low"] > c3["high"]:
+            fvg.append(("bearish", c3["high"], c1["low"]))
 
-    # GIFT NIFTY
-    text += "\n📉 GIFT NIFTY\n"
-    p, chg_str, chg = fetch(MARKETS["Gift Nifty"])
-    text += f"{p} {chg_str}\n"
+    return fvg[-5:] if fvg else []
 
-    # COMMODITIES
-    text += "\n🛢 COMMODITIES\n"
-    p, chg_str, _ = fetch(MARKETS["Crude"])
-    text += f"Crude: {p} {chg_str}\n"
+# ================= IFVG =================
+def detect_ifvg(df):
+    return detect_fvg(df)
 
-    p, chg_str, _ = fetch(MARKETS["Gold"])
-    text += f"Gold: {p} {chg_str}\n"
+# ================= ICT SIGNAL =================
+def ict_signal():
+    try:
+        score, price = get_trend_score()
 
-    text += "━━━━━━━━━━━━\n"
+        htf = yf.download("^NSEI", period="1d", interval="5m", progress=False)
+        ltf = yf.download("^NSEI", period="1d", interval="1m", progress=False)
 
-    # SENTIMENT
-    if score > 3:
-        sentiment = "🟢 Bullish"
-    elif score < -3:
-        sentiment = "🔴 Bearish"
-    else:
-        sentiment = "⚪ Neutral"
+        htf.columns = htf.columns.str.lower()
+        ltf.columns = ltf.columns.str.lower()
 
-    # TIME
-    now = datetime.now(IST).strftime("%d %b %Y %H:%M IST")
+        fvg_zones = detect_fvg(htf)
+        ifvg_zones = detect_ifvg(ltf)
 
-    # FINAL OUTPUT
-    final = f"""
-🌍 GLOBAL MARKET REPORT
-{now}
+        for fvg_type, low, high in fvg_zones[::-1]:
 
-Sentiment: {sentiment}
+            # price inside FVG
+            if low <= price <= high:
 
-{text}
+                for ifvg_type, ilow, ihigh in ifvg_zones[::-1]:
+
+                    # BEARISH LOGIC
+                    if fvg_type == "bearish" and ifvg_type == "bullish" and score <= -2:
+                        return f"""
+🚨 ICT SIGNAL
+
+Type: BEARISH IFVG ENTRY
+Price: {price}
+Zone: {low:.0f} – {high:.0f}
+
+Trend Score: {score}
+
+Entry: Breakdown candle
+SL: Above zone
+TP: Previous low
+
+Confidence: HIGH
 """
 
-    return final
+                    # BULLISH LOGIC
+                    if fvg_type == "bullish" and ifvg_type == "bearish" and score >= 2:
+                        return f"""
+🚨 ICT SIGNAL
+
+Type: BULLISH IFVG ENTRY
+Price: {price}
+Zone: {low:.0f} – {high:.0f}
+
+Trend Score: {score}
+
+Entry: Breakout candle
+SL: Below zone
+TP: Previous high
+
+Confidence: HIGH
+"""
+
+        return None
+
+    except Exception as e:
+        return f"Error: {e}"
 
 # ================= COMMANDS =================
 @bot.message_handler(commands=["start"])
 def start(msg):
-    send(msg.chat.id, "🤖 Global Market Bot Ready\nUse /global")
+    send("🔥 PRO ICT BOT ACTIVE\n\n/global\n/trend\n/signal")
 
-@bot.message_handler(commands=["global"])
-def global_cmd(msg):
-    send(msg.chat.id, global_market())
+@bot.message_handler(commands=["signal"])
+def signal(msg):
+    send("Scanning ICT setup...")
+    s = ict_signal()
+    send(s if s else "No high probability setup")
 
-# ================= RUN =================
-print("Bot running...")
-bot.infinity_polling()
+# ================= AUTO ALERT =================
+def auto_loop():
+    while True:
+        try:
+            sig = ict_signal()
+            if sig:
+                send(sig)
+                time.sleep(300)  # avoid spam
+        except Exception as e:
+            print(e)
+        time.sleep(60)
+
+# ================= START =================
+print("BOT RUNNING")
+
+threading.Thread(target=bot.polling, kwargs={"none_stop":True}).start()
+threading.Thread(target=auto_loop).start()
+
+while True:
+    time.sleep(10)
