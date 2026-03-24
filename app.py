@@ -85,71 +85,46 @@ def get_global():
     return "\n".join(out), sentiment
 
 # ================= TREND ENGINE =================
-def get_trend():
+def get_trend_score():
     try:
-        df = yf.download("^NSEI", period="60d", interval="1d", progress=False)
-        close = df["Close"]
+        df = yf.download("^NSEI", period="90d", interval="1d", progress=False)
 
-        ma20 = round(close.rolling(20).mean().iloc[-1],0)
-        ma50 = round(close.rolling(50).mean().iloc[-1],0)
-        price = round(close.iloc[-1],0)
+        if df is None or df.empty or len(df) < 20:
+            return 0, 0, "Data unavailable"
+
+        # Normalize columns
+        df.columns = [c.lower() for c in df.columns]
+
+        close = df["close"]
+
+        price = round(float(close.iloc[-1]), 0)
+
+        ma20 = round(float(close.rolling(20).mean().iloc[-1]), 0)
+        ma50 = round(float(close.rolling(50).mean().iloc[-1]), 0) if len(close) >= 50 else ma20
 
         # RSI
         delta = close.diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = (-delta.clip(upper=0)).rolling(14).mean()
-        rs = gain/loss
-        rsi = round((100-(100/(1+rs))).iloc[-1],1)
-
-        # ATR
-        high = df["High"]
-        low = df["Low"]
-        tr = pd.concat([
-            high-low,
-            (high-close.shift()).abs(),
-            (low-close.shift()).abs()
-        ],axis=1).max(axis=1)
-        atr = round(tr.rolling(14).mean().iloc[-1],0)
+        rs = gain / loss.replace(0, np.nan)
+        rsi = round(float(100 - (100 / (1 + rs)).iloc[-1]), 1)
 
         # SCORE
         score = 0
 
-        if price > ma20: score +=1
-        else: score -=1
+        score += 1 if price > ma20 else -1
+        score += 1 if ma20 > ma50 else -1
 
-        if ma20 > ma50: score +=1
-        else: score -=1
+        if rsi > 60:
+            score += 1
+        elif rsi < 40:
+            score -= 1
 
-        if rsi > 60: score +=1
-        elif rsi < 40: score -=1
+        return score, price, f"MA20:{ma20} MA50:{ma50} RSI:{rsi}"
 
-        # LABEL
-        if score >=3:
-            label="📈 STRONG BULLISH"
-            action="Buy CE on dips"
-            conf="HIGH"
-        elif score ==2:
-            label="📈 MODERATE BULLISH"
-            action="Buy CE carefully"
-            conf="MEDIUM"
-        elif score ==1:
-            label="⚪ WEAK TREND"
-            action="Avoid trades"
-            conf="LOW"
-        elif score ==0:
-            label="⚪ NO TRADE"
-            action="Stay out"
-            conf="LOW"
-        elif score <= -3:
-            label="📉 STRONG BEARISH"
-            action="Buy PE on rise"
-            conf="HIGH"
-        else:
-            label="📉 BEARISH"
-            action="Sell rallies"
-            conf="MEDIUM"
-
-        return f"""
+    except Exception as e:
+        print("TREND ERROR:", e)
+        return 0, 0, "Error"
 📊 NIFTY TREND ANALYSIS
 
 Price: {price}
@@ -175,50 +150,35 @@ Confidence: {conf}
 
 # ================= COMMANDS =================
 
-@bot.message_handler(commands=["start"])
-def start(msg):
-    safe_send(msg.chat.id,
-        "🤖 Bot Active\n\n"
-        "/global - Market report\n"
-        "/trend - Nifty trend analysis\n"
-    )
-
-@bot.message_handler(commands=["global"])
-def global_cmd(msg):
-    g, sentiment = get_global()
-
-    gift = fetch_price("^NSEI")[0]
-    crude = fetch_price("CL=F")[0]
-    gold = fetch_price("GC=F")[0]
-
-    safe_send(msg.chat.id,
-f"""GLOBAL MARKET REPORT
-{now_ist().strftime('%d %b %Y %H:%M IST')}
-
-Sentiment: {sentiment}
-
-{g}
-
-📉 GIFT NIFTY
-{gift}
-
-🛢 COMMODITIES
-Crude: {crude}
-Gold: {gold}
-
-🧠 VERDICT
-➡️ Based on sentiment + trend check /trend
-"""
-)
-
 @bot.message_handler(commands=["trend"])
 def trend_cmd(msg):
-    safe_send(msg.chat.id, get_trend())
+    score, price, info = get_trend_score()
 
-# ================= START =================
-print("Bot running...")
+    if price == 0:
+        send("⚠️ Trend data not available. Try again.")
+        return
 
-threading.Thread(target=bot.polling, kwargs={"none_stop":True}).start()
+    if score >= 3:
+        label = "📈 STRONG BULLISH"
+    elif score == 2:
+        label = "📈 MODERATE BULLISH"
+    elif score == 1:
+        label = "⚪ WEAK"
+    elif score == 0:
+        label = "⚪ NO TRADE"
+    elif score <= -3:
+        label = "📉 STRONG BEARISH"
+    else:
+        label = "📉 BEARISH"
 
-while True:
-    time.sleep(10)
+    send(f"""
+📊 NIFTY TREND
+
+Price: {price}
+
+{info}
+
+━━━━━━━━━━━━
+Score: {score}
+{label}
+""")
